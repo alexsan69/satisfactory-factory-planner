@@ -26,7 +26,7 @@ interface PlacedEntity {
   type: BuildingId | "belt";
   x: number; // m
   y: number; // m
-  rotation: 0 | 90 | 180 | 270;
+  rotation: 0 | 90 | 180 | 270; // 0 = entrée gauche / sortie droite
   meta?: any; // { w, h, node? }
 }
 
@@ -56,7 +56,12 @@ const BUILDINGS: Record<
   merger:       { id: "merger",       name: "Merger",       w: 4,  h: 4,  inputs: 3, outputs: 1 },
 };
 
-const DEFAULT_SCALE_PX_PER_M = 8;
+const DEFAULT_SCALE_PX_PER_M = 15; // un peu plus grand par défaut
+const PATH_GRID_M = 1;             // résolution du pathfinding (1 m)
+const BELT_THICKNESS_M = 0.3;      // épaisseur visuelle de la bande
+const CLEARANCE_M = 0.6;           // marge de sécurité autour des obstacles
+const START_END_FREE_RADIUS = 1;   // tolérance autour des ports
+const ENTITY_PADDING_M = 0.4;      // espace min entre entités
 
 /* ======================= Composant principal ======================= */
 export default function FactoryPlanner() {
@@ -108,7 +113,8 @@ export default function FactoryPlanner() {
     const y = snapToGrid(my);
     if (tool === "place") {
       const spec = BUILDINGS[palette];
-      addEntity({ type: palette, x, y, rotation: 0, meta: { w: spec.w, h: spec.h } });
+      const pos = findFreePositionNear(x, y, spec.w, spec.h, entities);
+      addEntity({ type: palette, x: pos.x, y: pos.y, rotation: 0, meta: { w: spec.w, h: spec.h } });
     }
   }
 
@@ -152,6 +158,39 @@ export default function FactoryPlanner() {
     return idx === -1 ? 5 : idx + 1;
   }
 
+  /* ---------------------- Collision & placement utils --------------------- */
+  type Rect = { x: number; y: number; w: number; h: number };
+  function rectOfEntity(e: PlacedEntity): Rect {
+    return { x: e.x, y: e.y, w: e.meta?.w ?? 2, h: e.meta?.h ?? 2 };
+  }
+  function expandRect(r: Rect, m: number): Rect {
+    return { x: r.x - m, y: r.y - m, w: r.w + 2*m, h: r.h + 2*m };
+  }
+  function intersects(a: Rect, b: Rect) {
+    return !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
+  }
+  function collidesAny(r: Rect, obs: PlacedEntity[]) {
+    const rr = expandRect(r, ENTITY_PADDING_M);
+    return obs.some(o => intersects(rr, rectOfEntity(o)));
+  }
+  // Cherche une position libre proche (spirale simple)
+  function findFreePositionNear(x:number, y:number, w:number, h:number, obs: PlacedEntity[]) {
+    const maxR = 40;
+    const step = 1;
+    for (let r=0; r<=maxR; r+=step) {
+      const candidates = [
+        {x:x, y:y+r}, {x:x, y:y-r},
+        {x:x+r, y:y}, {x:x-r, y:y},
+        {x:x+r, y:y+r}, {x:x-r, y:y+r}, {x:x+r, y:y-r}, {x:x-r, y:y-r},
+      ];
+      for (const c of candidates) {
+        const rc = { x: snapToGrid(c.x), y: snapToGrid(c.y), w, h };
+        if (!collidesAny(rc, obs)) return { x: rc.x, y: rc.y };
+      }
+    }
+    return { x, y };
+  }
+
   /* ------------------------ Auto-layout des machines ----------------------- */
   function autoLayout(root: Node, originX = 0, originY = 0) {
     const layers: Node[][] = [];
@@ -161,55 +200,211 @@ export default function FactoryPlanner() {
       n.inputs.forEach(i => { if (i.from) traverse(i.from, depth + 1); });
     })(root, 0);
 
-    let y = originY;
+    // On pose de gauche (matières) à droite (produit)
+    let yBase = originY;
     const placements: PlacedEntity[] = [];
+    const obstacles: PlacedEntity[] = [];
+
     layers.slice().reverse().forEach(nodes => {
       let x = originX;
       nodes.forEach(node => {
         const spec = BUILDINGS[node.building];
         const count = Math.ceil(node.machines * 100) / 100;
-        const spacing = 2;
+        const spacing = 2; // m
         const perRow = Math.max(1, Math.floor((FOUNDATION_M * 6) / (spec.w + spacing)));
         let placed = 0;
         while (placed < Math.ceil(count)) {
           const col = placed % perRow;
           const row = Math.floor(placed / perRow);
-          const px = snapToGrid(x + col * (spec.w + spacing));
-          const py = snapToGrid(y + row * (spec.h + spacing));
-          placements.push({
+          const cx = x + col * (spec.w + spacing);
+          const cy = yBase + row * (spec.h + spacing);
+
+          const pos = findFreePositionNear(snapToGrid(cx), snapToGrid(cy), spec.w, spec.h, obstacles);
+
+          const ent: PlacedEntity = {
             id: Math.random().toString(36).slice(2, 9),
             type: node.building,
-            x: px,
-            y: py,
-            rotation: 0,
+            x: pos.x,
+            y: pos.y,
+            rotation: 0, // flux gauche→droite
             meta: { w: spec.w, h: spec.h, node },
-          });
+          };
+          placements.push(ent);
+          obstacles.push(ent);
           placed++;
         }
-        x += (perRow * (spec.w + spacing)) + 8; // +1 fondation entre groupes
+        x += (perRow * (spec.w + spacing)) + 8; // +1 dalle
       });
-      y += 12;
+      yBase += 12;
     });
     return placements;
   }
 
-  /* ------------------- Routage + splitters/mergers v2.6 ------------------- */
-  function routeManhattan(a: {x:number;y:number}, b: {x:number;y:number}, grid=1): BeltSegment[] {
-    const t = 0.3; // épaisseur (m)
-    const midX = Math.round(((a.x + b.x) / 2) / grid) * grid;
+  /* ================= Routage A* qui évite les machines (v2.7+) ================ */
+  function pointInRect(px: number, py: number, r: Rect) {
+    return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+  }
+
+  // A* sur grille 1 m, 4 directions, avec obstacles rectangulaires élargis
+  function routeAvoidingMachines(
+    start: {x:number;y:number},
+    end: {x:number;y:number},
+    ens: PlacedEntity[]
+  ): BeltSegment[] {
+    const obstacles = ens.map(rectOfEntity).map(r => expandRect(r, CLEARANCE_M));
+
+    const xs = [start.x, end.x, ...obstacles.map(r=>r.x), ...obstacles.map(r=>r.x+r.w)];
+    const ys = [start.y, end.y, ...obstacles.map(r=>r.y), ...obstacles.map(r=>r.y+r.h)];
+    let minX = Math.floor(Math.min(...xs) - 12);
+    let maxX = Math.ceil (Math.max(...xs) + 12);
+    let minY = Math.floor(Math.min(...ys) - 12);
+    let maxY = Math.ceil (Math.max(...ys) + 12);
+
+    const cols = Math.max(1, Math.round((maxX - minX) / PATH_GRID_M));
+    const rows = Math.max(1, Math.round((maxY - minY) / PATH_GRID_M));
+
+    function toGridX(x:number){ return Math.round((x - minX) / PATH_GRID_M); }
+    function toGridY(y:number){ return Math.round((y - minY) / PATH_GRID_M); }
+    function toWorldX(gx:number){ return minX + gx * PATH_GRID_M; }
+    function toWorldY(gy:number){ return minY + gy * PATH_GRID_M; }
+
+    const sGX = toGridX(start.x), sGY = toGridY(start.y);
+    const eGX = toGridX(end.x),   eGY = toGridY(end.y);
+
+    function collides(cx:number, cy:number) {
+      // Laisse respirer près des ports
+      if (Math.hypot(cx - start.x, cy - start.y) <= START_END_FREE_RADIUS) return false;
+      if (Math.hypot(cx - end.x,   cy - end.y)   <= START_END_FREE_RADIUS) return false;
+      for (const r of obstacles) {
+        if (pointInRect(cx, cy, r)) return true;
+      }
+      return false;
+    }
+
+    const open: Array<[number, number, number]> = [];
+    const gScore = new Map<string, number>();
+    const fScore = new Map<string, number>();
+    const came   = new Map<string, string>();
+    function key(gx:number,gy:number){ return `${gx},${gy}`; }
+
+    const sKey = key(sGX,sGY);
+    gScore.set(sKey, 0);
+    fScore.set(sKey, Math.abs(sGX-eGX)+Math.abs(sGY-eGY));
+    open.push([fScore.get(sKey)!, sGX, sGY]);
+
+    const inBounds = (gx:number, gy:number) => gx>=0 && gx<cols && gy>=0 && gy<rows;
+
+    let steps = 0, foundKey: string | null = null;
+    while (open.length) {
+      open.sort((a,b)=>a[0]-b[0]);
+      const [, gx, gy] = open.shift()!;
+      const k = key(gx,gy);
+      if (gx === eGX && gy === eGY) { foundKey = k; break; }
+      const neigh = [[1,0],[-1,0],[0,1],[0,-1]];
+      for (const [dx,dy] of neigh) {
+        const ngx = gx+dx, ngy = gy+dy;
+        if (!inBounds(ngx,ngy)) continue;
+        const cx = toWorldX(ngx), cy = toWorldY(ngy);
+        if (collides(cx,cy)) continue;
+        const nk = key(ngx,ngy);
+        const tentative = (gScore.get(k) ?? Infinity) + 1;
+        if (tentative < (gScore.get(nk) ?? Infinity)) {
+          came.set(nk, k);
+          gScore.set(nk, tentative);
+          const h = Math.abs(ngx - eGX) + Math.abs(ngy - eGY);
+          const f = tentative + h;
+          fScore.set(nk, f);
+          if (!open.find(t => t[1]===ngx && t[2]===ngy)) open.push([f, ngx, ngy]);
+        }
+      }
+      steps++;
+      if (steps > 150000) break;
+    }
+
+    if (!foundKey) return routeManhattan(start, end);
+
+    // Reconstruit le chemin
+    const cells: Array<{x:number;y:number}> = [];
+    let cur = key(eGX,eGY);
+    while (cur !== sKey) {
+      const [gx,gy] = cur.split(",").map(Number);
+      cells.push({ x: toWorldX(gx), y: toWorldY(gy) });
+      cur = came.get(cur)!;
+      if (!cur) break;
+    }
+    cells.push({ x: start.x, y: start.y });
+    cells.reverse();
+
+    // Compresse en segments
     const segs: BeltSegment[] = [];
-    // h1
+    let i = 0;
+    while (i < cells.length - 1) {
+      const a = cells[i];
+      let j = i + 1;
+      const dirX = Math.sign(cells[j].x - a.x);
+      const dirY = Math.sign(cells[j].y - a.y);
+      while (j + 1 < cells.length) {
+        const nx = Math.sign(cells[j+1].x - cells[j].x);
+        const ny = Math.sign(cells[j+1].y - cells[j].y);
+        if (nx !== dirX || ny !== dirY) break;
+        j++;
+      }
+      const b = cells[j];
+      if (dirY === 0) {
+        const x1 = Math.min(a.x, b.x), x2 = Math.max(a.x, b.x);
+        segs.push({ x: x1, y: a.y - BELT_THICKNESS_M/2, w: x2 - x1, h: BELT_THICKNESS_M });
+      } else {
+        const y1 = Math.min(a.y, b.y), y2 = Math.max(a.y, b.y);
+        segs.push({ x: a.x - BELT_THICKNESS_M/2, y: y1, w: BELT_THICKNESS_M, h: y2 - y1 });
+      }
+      i = j;
+    }
+    return segs;
+  }
+
+  // L fallback “L”
+  function routeManhattan(a: {x:number;y:number}, b: {x:number;y:number}): BeltSegment[] {
+    const t = BELT_THICKNESS_M;
+    const midX = Math.round(((a.x + b.x) / 2) / PATH_GRID_M) * PATH_GRID_M;
+    const segs: BeltSegment[] = [];
     const x1 = Math.min(a.x, midX), x2 = Math.max(a.x, midX);
     segs.push({ x: x1, y: a.y - t/2, w: x2 - x1, h: t });
-    // v
     const y1 = Math.min(a.y, b.y), y2 = Math.max(a.y, b.y);
     segs.push({ x: midX - t/2, y: y1, w: t, h: y2 - y1 });
-    // h2
     const x3 = Math.min(midX, b.x), x4 = Math.max(midX, b.x);
     segs.push({ x: x3, y: b.y - t/2, w: x4 - x3, h: t });
     return segs;
   }
 
+  /* ---------------------------- Ports I/O ---------------------------- */
+  // Combien d’entrées/sorties pour une entité donnée
+  function inputsCount(e: PlacedEntity) {
+    if (e.type === "merger") return 3;
+    if (e.meta?.node?.inputs?.length) return e.meta.node.inputs.length;
+    return BUILDINGS[e.type as BuildingId]?.inputs ?? 1;
+  }
+  function outputsCount(e: PlacedEntity) {
+    if (e.type === "splitter") return 3;
+    return BUILDINGS[e.type as BuildingId]?.outputs ?? 1;
+  }
+
+  // Coord. port entrée/sortie (rotation 0 = entrées à gauche, sorties à droite)
+  function inputPortOf(e: PlacedEntity, idx = 0) {
+    const w = e.meta?.w ?? 2, h = e.meta?.h ?? 2;
+    const n = Math.max(1, inputsCount(e));
+    const y = e.y + ((idx + 1) * (h / (n + 1)));
+    const x = e.x; // côté gauche
+    return { x, y };
+  }
+  function outputPortOf(e: PlacedEntity, idx = 0) {
+    const w = e.meta?.w ?? 2, h = e.meta?.h ?? 2;
+    const n = Math.max(1, outputsCount(e));
+    const y = e.y + ((idx + 1) * (h / (n + 1)));
+    const x = e.x + w; // côté droit
+    return { x, y };
+  }
+
+  /* ------------------- Splitters/Mergers & planification ------------------- */
   function collectEdges(root: Node) {
     const edges: { from: Node; to: Node; inputIndex: number; rate: number }[] = [];
     (function dfs(n: Node) {
@@ -223,197 +418,163 @@ export default function FactoryPlanner() {
     return edges;
   }
 
-  // Entités ↔ Node
   function entitiesForNode(ens: PlacedEntity[], node?: Node) {
     if (!node) return [] as PlacedEntity[];
     return ens.filter(e => e.meta?.node?.recipeId === node.recipeId);
   }
 
-  // Ports (machines/splitter/merger)
-  function outputPortOf(e: PlacedEntity) {
-    const w = e.meta?.w ?? 2, h = e.meta?.h ?? 2;
-    return { x: e.x + w, y: e.y + h / 2 }; // côté droit, milieu
-  }
-  function inputPortOf(e: PlacedEntity, idx = 0) {
-    const w = e.meta?.w ?? 2, h = e.meta?.h ?? 2;
-    const defaultSlots =
-      e.type === "merger" ? 3 :
-      e.type === "assembler" ? 2 :
-      e.type === "manufacturer" ? 4 : 1;
-    const slots = Math.max(1, e.meta?.node?.inputs?.length ?? defaultSlots);
-    const y = e.y + ((idx + 1) * (h / (slots + 1)));
-    return { x: e.x, y }; // côté gauche
-  }
-
-  // Placement d’un splitter/merger (proche de la machine)
-  function placeSplitterNear(prod: PlacedEntity): PlacedEntity {
+  function placeSplitterNear(prod: PlacedEntity, obs: PlacedEntity[]): PlacedEntity {
     const spec = BUILDINGS["splitter"];
     const w = prod.meta?.w ?? 2, h = prod.meta?.h ?? 2;
-    const x = snapToGrid(prod.x + w + 1);
-    const y = snapToGrid(prod.y + h / 2 - spec.h / 2);
-    return {
-      id: Math.random().toString(36).slice(2,9),
-      type: "splitter",
-      x, y, rotation: 0,
-      meta: { w: spec.w, h: spec.h }
-    };
+    const intended = { x: prod.x + w + 1, y: prod.y + h / 2 - spec.h / 2 };
+    const pos = findFreePositionNear(intended.x, intended.y, spec.w, spec.h, obs);
+    return { id: Math.random().toString(36).slice(2,9), type: "splitter", x: pos.x, y: pos.y, rotation: 0, meta: { w: spec.w, h: spec.h } };
   }
-  function placeMergerNear(cons: PlacedEntity): PlacedEntity {
+  function placeMergerNear(cons: PlacedEntity, obs: PlacedEntity[]): PlacedEntity {
     const spec = BUILDINGS["merger"];
     const w = cons.meta?.w ?? 2, h = cons.meta?.h ?? 2;
-    const x = snapToGrid(cons.x - spec.w - 1);
-    const y = snapToGrid(cons.y + h / 2 - spec.h / 2);
-    return {
-      id: Math.random().toString(36).slice(2,9),
-      type: "merger",
-      x, y, rotation: 0,
-      meta: { w: spec.w, h: spec.h }
-    };
+    const intended = { x: cons.x - spec.w - 1, y: cons.y + h / 2 - spec.h / 2 };
+    const pos = findFreePositionNear(intended.x, intended.y, spec.w, spec.h, obs);
+    return { id: Math.random().toString(36).slice(2,9), type: "merger", x: pos.x, y: pos.y, rotation: 0, meta: { w: spec.w, h: spec.h } };
   }
 
   function planBeltsWithJunctions(allEntities: PlacedEntity[], root: Node) {
     const edges = collectEdges(root);
     const belts: Belt[] = [];
     const extras: PlacedEntity[] = [];
+    const obstacles: PlacedEntity[] = [...allEntities];
 
-    // Pour éviter les doublons : un splitter par producteur, un merger par consommateur
     const splitterByProdId = new Map<string, PlacedEntity>();
     const mergerByConsId   = new Map<string, PlacedEntity>();
 
     edges.forEach(edge => {
-      const producers = entitiesForNode(allEntities, edge.from);
-      const consumers = entitiesForNode(allEntities, edge.to);
+      const producers = entitiesForNode(obstacles, edge.from);
+      const consumers = entitiesForNode(obstacles, edge.to);
       if (producers.length === 0 || consumers.length === 0) return;
 
-      // Répartition simple des débits
       const total = edge.rate;
       const perConsumerRate = total / consumers.length;
       const perProducerRate = total / producers.length;
 
-      // Cas 1: 1 prod → N cons  (Split)
+      // 1 → N (split)
       if (producers.length === 1 && consumers.length > 1) {
         const prod = producers[0];
-
-        // Splitter près du producteur (unique)
         let split = splitterByProdId.get(prod.id);
         if (!split) {
-          split = placeSplitterNear(prod);
+          split = placeSplitterNear(prod, obstacles);
           splitterByProdId.set(prod.id, split);
           extras.push(split);
+          obstacles.push(split);
 
-          // Ceinture prod → splitter (taux total)
           belts.push({
             id: Math.random().toString(36).slice(2,9),
             mk: minBeltMkFor(total),
             rate: total,
-            segments: routeManhattan(outputPortOf(prod), inputPortOf(split), 1),
+            segments: routeAvoidingMachines(outputPortOf(prod), inputPortOf(split), obstacles),
           });
         }
 
-        // Branches splitter → chaque consommateur
         consumers.forEach((cons, j) => {
+          const outIdx = j % outputsCount(split!);
           belts.push({
             id: Math.random().toString(36).slice(2,9),
             mk: minBeltMkFor(perConsumerRate),
             rate: perConsumerRate,
-            segments: routeManhattan(outputPortOf(split!), inputPortOf(cons, edge.inputIndex), 1),
+            segments: routeAvoidingMachines(outputPortOf(split!, outIdx), inputPortOf(cons, edge.inputIndex), obstacles),
           });
         });
         return;
       }
 
-      // Cas 2: N prod → 1 cons  (Merge)
+      // N → 1 (merge)
       if (producers.length > 1 && consumers.length === 1) {
         const cons = consumers[0];
-
-        // Merger près du consommateur (unique)
         let merge = mergerByConsId.get(cons.id);
         if (!merge) {
-          merge = placeMergerNear(cons);
+          merge = placeMergerNear(cons, obstacles);
           mergerByConsId.set(cons.id, merge);
           extras.push(merge);
+          obstacles.push(merge);
 
-          // Ceinture merger → consommateur (taux total)
           belts.push({
             id: Math.random().toString(36).slice(2,9),
             mk: minBeltMkFor(total),
             rate: total,
-            segments: routeManhattan(outputPortOf(merge), inputPortOf(cons, edge.inputIndex), 1),
+            segments: routeAvoidingMachines(outputPortOf(merge), inputPortOf(cons, edge.inputIndex), obstacles),
           });
         }
 
-        // Branches chaque producteur → merger (réparti)
-        producers.forEach(prod => {
+        producers.forEach((prod, j) => {
+          const inIdx = j % inputsCount(merge!);
           belts.push({
             id: Math.random().toString(36).slice(2,9),
             mk: minBeltMkFor(perProducerRate),
             rate: perProducerRate,
-            segments: routeManhattan(outputPortOf(prod), inputPortOf(merge!), 1),
+            segments: routeAvoidingMachines(outputPortOf(prod), inputPortOf(merge!, inIdx), obstacles),
           });
         });
         return;
       }
 
-      // Cas 3: N prod → N cons  (Split + Merge)
+      // N → N (split + merge)
       if (producers.length > 1 && consumers.length > 1) {
-        // Splitter par producteur
         const splitters = producers.map(prod => {
           let s = splitterByProdId.get(prod.id);
           if (!s) {
-            s = placeSplitterNear(prod);
+            s = placeSplitterNear(prod, obstacles);
             splitterByProdId.set(prod.id, s);
             extras.push(s);
-            // prod → split (par producteur)
+            obstacles.push(s);
             belts.push({
               id: Math.random().toString(36).slice(2,9),
               mk: minBeltMkFor(perProducerRate),
               rate: perProducerRate,
-              segments: routeManhattan(outputPortOf(prod), inputPortOf(s), 1),
+              segments: routeAvoidingMachines(outputPortOf(prod), inputPortOf(s), obstacles),
             });
           }
           return s!;
         });
 
-        // Merger par consommateur (unique par consommateur)
         const mergers = consumers.map(cons => {
           let m = mergerByConsId.get(cons.id);
           if (!m) {
-            m = placeMergerNear(cons);
+            m = placeMergerNear(cons, obstacles);
             mergerByConsId.set(cons.id, m);
             extras.push(m);
-            // merger → cons (par consommateur)
+            obstacles.push(m);
             belts.push({
               id: Math.random().toString(36).slice(2,9),
               mk: minBeltMkFor(perConsumerRate),
               rate: perConsumerRate,
-              segments: routeManhattan(outputPortOf(m), inputPortOf(cons, edge.inputIndex), 1),
+              segments: routeAvoidingMachines(outputPortOf(m), inputPortOf(cons, edge.inputIndex), obstacles),
             });
           }
           return m!;
         });
 
-        // Lignes splitters → mergers (maillage simple : chaque splitter → chaque merger)
-        const rateSplitToMerge = total / Math.max(1, producers.length); // approx
+        const rateSplitToMerge = total / Math.max(1, producers.length);
         splitters.forEach(s => {
-          mergers.forEach(m => {
+          mergers.forEach((m, k) => {
+            const outIdx = k % outputsCount(s);
+            const inIdx  = 0; // merger: on utilise ses 3 entrées mais ici maillage simple
             belts.push({
               id: Math.random().toString(36).slice(2,9),
-              mk: minBeltMkFor(rateSplitToMerge / mergers.length), // réparti
+              mk: minBeltMkFor(rateSplitToMerge / mergers.length),
               rate: rateSplitToMerge / mergers.length,
-              segments: routeManhattan(outputPortOf(s), inputPortOf(m), 1),
+              segments: routeAvoidingMachines(outputPortOf(s, outIdx), inputPortOf(m, inIdx), obstacles),
             });
           });
         });
         return;
       }
 
-      // Cas 4: 1 prod → 1 cons (direct)
+      // 1 → 1 direct
       const prod = producers[0], cons = consumers[0];
       belts.push({
         id: Math.random().toString(36).slice(2,9),
         mk: minBeltMkFor(total),
         rate: total,
-        segments: routeManhattan(outputPortOf(prod), inputPortOf(cons, edge.inputIndex), 1),
+        segments: routeAvoidingMachines(outputPortOf(prod), inputPortOf(cons, edge.inputIndex), obstacles),
       });
     });
 
@@ -428,10 +589,10 @@ export default function FactoryPlanner() {
 
     const placement = autoLayout(chain, 8, 8);
 
-    // Conserver les placements “manuels” existants (sans node) et remplacer les calculés
+    // Conserver les placements “manuels” (sans node) et remplacer les calculés
     const combined = entities.filter(e => !e.meta?.node).concat(placement);
 
-    // Générer convoyeurs + splitters/mergers auto
+    // Générer convoyeurs + splitters/mergers auto + routage A* (ports exacts)
     const { belts: newBelts, extras } = planBeltsWithJunctions(combined, chain);
 
     setEntities(combined.concat(extras));
@@ -456,10 +617,10 @@ export default function FactoryPlanner() {
   return (
     <div className="w-full h-full bg-zinc-900 text-zinc-100">
       <header className="flex items-center gap-3 p-3 border-b border-zinc-800 sticky top-0 z-20 bg-zinc-900/80 backdrop-blur">
-        <h1 className="text-xl font-semibold">Satisfactory Factory Planner — v2.6</h1>
+        <h1 className="text-xl font-semibold">Satisfactory Factory Planner — v2.8</h1>
         <div className="ml-auto flex items-center gap-2 text-sm">
           <span className="opacity-70">Zoom</span>
-          <input type="range" min={4} max={20} step={1} value={scale} onChange={e => setScale(parseInt(e.target.value))} />
+          <input type="range" min={4} max={26} step={1} value={scale} onChange={e => setScale(parseInt(e.target.value))} />
           <span className="w-10 text-right">{scale}px/m</span>
 
           <span className="ml-4 opacity-70">Snap</span>
@@ -507,7 +668,7 @@ export default function FactoryPlanner() {
 
         {/* BOARD */}
         <main className="relative overflow-auto" onClick={handleBoardClick}>
-          <div ref={boardRef} className="relative min-w-[2000px] min-h-[1200px]" style={bgStyle}>
+          <div ref={boardRef} className="relative min-w-[2200px] min-h={[1400].toString()} style" style={bgStyle as any}>
             <div className="absolute left-0 top-0 p-2 text-xs opacity-70">Origine (0,0) m</div>
 
             {/* Convoyeurs (bandes ambrées) */}
@@ -522,7 +683,7 @@ export default function FactoryPlanner() {
                     top: toPx(s.y),
                     width: toPx(Math.max(0.1, s.w)),
                     height: toPx(Math.max(0.1, s.h)),
-                    background: "rgba(250, 204, 21, 0.85)",
+                    background: "rgba(250, 204, 21, 0.9)",
                     borderRadius: toPx(0.1),
                   }}
                 />
@@ -530,34 +691,71 @@ export default function FactoryPlanner() {
             )}
 
             {/* Machines + jonctions */}
-            {entities.map(e => (
-              <div
-                key={e.id}
-                className={`absolute rounded-2xl shadow-md border ${e.type==="splitter"||e.type==="merger" ? "border-amber-500 bg-amber-500/10" : "border-zinc-700 bg-zinc-800/80"} backdrop-blur-sm hover:shadow-lg`}
-                title={
-                  e.meta?.node
-                    ? (() => {
-                        const round2 = (v: number) => Math.round(v * 100) / 100;
-                        const n: Node = e.meta.node;
-                        const inputs = n.inputs.map(i => `${round2(i.rate)}/min ${i.name}`).join(" + ");
-                        return `${n.name}: ${round2(n.outputRate)}/min\n${inputs}\nBelt ≥ Mk${minBeltMkFor(n.outputRate)}`;
-                      })()
-                    : BUILDINGS[e.type as BuildingId]?.name
-                }
-                style={{ left: toPx(e.x), top: toPx(e.y), width: toPx(e.meta?.w ?? 2), height: toPx(e.meta?.h ?? 2) }}
-              >
-                <div className="text-[10px] leading-tight p-1 text-zinc-200 flex items-center justify-between">
-                  <span>{BUILDINGS[e.type as BuildingId]?.name ?? "Belt"}</span>
-                  <button className="opacity-70 hover:opacity-100" onClick={(ev) => { ev.stopPropagation(); removeEntity(e.id); }}>✕</button>
-                </div>
-                {e.meta?.node && (
-                  <div className="px-2 pb-1 text-[10px] text-zinc-300">
-                    <div>{e.meta.node.name} · {Math.round(e.meta.node.outputRate*100)/100}/min</div>
-                    <div>{Math.round(e.meta.node.machines*100)/100}×</div>
+            {entities.map(e => {
+              const w = e.meta?.w ?? 2;
+              const h = e.meta?.h ?? 2;
+              const inN = inputsCount(e);
+              const outN = outputsCount(e);
+              return (
+                <div
+                  key={e.id}
+                  className={`absolute rounded-2xl shadow-md border ${e.type==="splitter"||e.type==="merger" ? "border-amber-500 bg-amber-500/10" : "border-zinc-700 bg-zinc-800/80"} backdrop-blur-sm hover:shadow-lg`}
+                  title={
+                    e.meta?.node
+                      ? (() => {
+                          const round2 = (v: number) => Math.round(v * 100) / 100;
+                          const n: Node = e.meta.node;
+                          const inputs = n.inputs.map(i => `${round2(i.rate)}/min ${i.name}`).join(" + ");
+                          return `${n.name}: ${round2(n.outputRate)}/min\n${inputs}\nBelt ≥ Mk${minBeltMkFor(n.outputRate)}`;
+                        })()
+                      : BUILDINGS[e.type as BuildingId]?.name
+                  }
+                  style={{ left: toPx(e.x), top: toPx(e.y), width: toPx(w), height: toPx(h) }}
+                >
+                  <div className="text-[10px] leading-tight p-1 text-zinc-200 flex items-center justify-between">
+                    <span>{BUILDINGS[e.type as BuildingId]?.name ?? "Belt"}</span>
+                    <button className="opacity-70 hover:opacity-100" onClick={(ev) => { ev.stopPropagation(); removeEntity(e.id); }}>✕</button>
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {/* Ports visuels (Entrées à gauche / Sorties à droite) */}
+                  {/* Entrées */}
+                  {[...Array(inN)].map((_, i) => (
+                    <div
+                      key={`in-${i}`}
+                      className="absolute bg-amber-300 rounded-full"
+                      style={{
+                        left: -4,
+                        top: `calc(${((i + 1) * 100) / (inN + 1)}% - 3px)`,
+                        width: 6,
+                        height: 6,
+                      }}
+                      title="Entrée"
+                    />
+                  ))}
+                  {/* Sorties */}
+                  {[...Array(outN)].map((_, i) => (
+                    <div
+                      key={`out-${i}`}
+                      className="absolute bg-amber-300 rounded-full"
+                      style={{
+                        right: -4,
+                        top: `calc(${((i + 1) * 100) / (outN + 1)}% - 3px)`,
+                        width: 6,
+                        height: 6,
+                      }}
+                      title="Sortie"
+                    />
+                  ))}
+
+                  {e.meta?.node && (
+                    <div className="px-2 pb-1 text-[10px] text-zinc-300">
+                      <div>{e.meta.node.name} · {Math.round(e.meta.node.outputRate*100)/100}/min</div>
+                      <div>{Math.round(e.meta.node.machines*100)/100}×</div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </main>
 
@@ -589,10 +787,10 @@ export default function FactoryPlanner() {
           <div className="pt-4 border-t border-zinc-800 text-sm space-y-2">
             <h3 className="uppercase tracking-wider opacity-70">Notes</h3>
             <ul className="list-disc ml-5 space-y-1 opacity-90">
+              <li>Placement anti-collision + marge {ENTITY_PADDING_M} m.</li>
+              <li>Ports définis : entrées gauche, sorties droite (multi-ports selon type).</li>
+              <li>Splitters/Mergers auto + routage A* depuis les ports.</li>
               <li>Recettes depuis <code>src/data/recipes.json</code>.</li>
-              <li>Convoyeurs par machine + Mk sur chaque branche.</li>
-              <li>Splitters/Mergers placés automatiquement (v2.6).</li>
-              <li>Prochaines étapes : évitement d’obstacles, ports I/O exacts, énergie.</li>
             </ul>
           </div>
         </aside>
