@@ -1,0 +1,19 @@
+[
+  { "id": "iron_ingot", "product": { "name": "Iron Ingot", "rate": 30 }, "inputs": [{ "name": "Iron Ore", "rate": 30 }], "building": "smelter" },
+  { "id": "copper_ingot", "product": { "name": "Copper Ingot", "rate": 30 }, "inputs": [{ "name": "Copper Ore", "rate": 30 }], "building": "smelter" },
+
+  { "id": "iron_rod", "product": { "name": "Iron Rod", "rate": 15 }, "inputs": [{ "name": "Iron Ingot", "rate": 15 }], "building": "constructor" },
+  { "id": "iron_plate", "product": { "name": "Iron Plate", "rate": 20 }, "inputs": [{ "name": "Iron Ingot", "rate": 30 }], "building": "constructor" },
+  { "id": "screw", "product": { "name": "Screw", "rate": 40 }, "inputs": [{ "name": "Iron Rod", "rate": 10 }], "building": "constructor" },
+
+  { "id": "wire", "product": { "name": "Wire", "rate": 30 }, "inputs": [{ "name": "Copper Ingot", "rate": 15 }], "building": "constructor" },
+  { "id": "cable", "product": { "name": "Cable", "rate": 30 }, "inputs": [{ "name": "Wire", "rate": 60 }], "building": "constructor" },
+  { "id": "concrete", "product": { "name": "Concrete", "rate": 15 }, "inputs": [{ "name": "Limestone", "rate": 45 }], "building": "constructor" },
+
+  { "id": "rip_default", "product": { "name": "Reinforced Iron Plate", "rate": 5 }, "inputs": [{ "name": "Iron Plate", "rate": 30 }, { "name": "Screw", "rate": 60 }], "building": "assembler" },
+  { "id": "rip_bolted", "product": { "name": "Reinforced Iron Plate", "rate": 15 }, "inputs": [{ "name": "Iron Plate", "rate": 90 }, { "name": "Screw", "rate": 250 }], "building": "assembler", "alt": true },
+
+  { "id": "rotor", "product": { "name": "Rotor", "rate": 4 }, "inputs": [{ "name": "Iron Rod", "rate": 20 }, { "name": "Screw", "rate": 100 }], "building": "assembler" },
+  { "id": "modular_frame", "product": { "name": "Modular Frame", "rate": 2 }, "inputs": [{ "name": "Reinforced Iron Plate", "rate": 3 }, { "name": "Iron Rod", "rate": 12 }], "building": "assembler" },
+  { "id": "smart_plating", "product": { "name": "Smart Plating", "rate": 2 }, "inputs": [{ "name": "Reinforced Iron Plate", "rate": 2 }, { "name": "Rotor", "rate": 2 }], "building": "assembler" }
+]
