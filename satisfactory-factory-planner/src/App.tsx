@@ -1,17 +1,33 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { FOUNDATION_M, BELT_SPEEDS, BUILDINGS } from "./data/constants";
-import type { BuildingId, Recipe } from "./types";
 import RECIPES_DATA from "./data/recipes.json";
+
+// ---------- Types & constantes locales (self-contained) ----------
+export type BuildingId =
+  | "smelter"
+  | "constructor"
+  | "assembler"
+  | "manufacturer"
+  | "splitter"
+  | "merger";
+
+export interface Ingredient { name: string; rate: number } // /min
+export interface Recipe {
+  id: string;
+  product: { name: string; rate: number }; // /min
+  inputs: Ingredient[];
+  building: BuildingId;
+  alt?: boolean;
+}
 
 type ToolType = "select" | "place" | "belt";
 
 interface PlacedEntity {
   id: string;
   type: BuildingId | "belt";
-  x: number;
-  y: number;
+  x: number; // en mètres
+  y: number; // en mètres
   rotation: 0 | 90 | 180 | 270;
-  meta?: any;
+  meta?: any; // { w, h, node? }
 }
 
 type Node = {
@@ -23,17 +39,36 @@ type Node = {
   inputs: { name: string; rate: number; from?: Node }[];
 };
 
+type BeltSegment = { x: number; y: number; w: number; h: number }; // en mètres
+type Belt = { id: string; mk: number; rate: number; segments: BeltSegment[] };
+
+const FOUNDATION_M = 8;
+const BELT_SPEEDS = [60, 120, 270, 480, 780]; // Mk1..Mk5
+const BUILDINGS: Record<
+  BuildingId,
+  { id: BuildingId; name: string; w: number; h: number; inputs: number; outputs: number }
+> = {
+  smelter:      { id: "smelter",      name: "Smelter",      w: 6,  h: 9,  inputs: 1, outputs: 1 },
+  constructor:  { id: "constructor",  name: "Constructor",  w: 8,  h: 10, inputs: 1, outputs: 1 },
+  assembler:    { id: "assembler",    name: "Assembler",    w: 10, h: 15, inputs: 2, outputs: 1 },
+  manufacturer: { id: "manufacturer", name: "Manufacturer", w: 18, h: 20, inputs: 4, outputs: 1 },
+  splitter:     { id: "splitter",     name: "Splitter",     w: 4,  h: 4,  inputs: 1, outputs: 3 },
+  merger:       { id: "merger",       name: "Merger",       w: 4,  h: 4,  inputs: 3, outputs: 1 },
+};
+
 const DEFAULT_SCALE_PX_PER_M = 8;
 
+// ======================= Composant principal =======================
 export default function FactoryPlanner() {
-  // UI state
+  // --- UI ---
   const [scale, setScale] = useState(DEFAULT_SCALE_PX_PER_M);
   const [gridStep, setGridStep] = useState(1);
   const [tool, setTool] = useState<ToolType>("select");
   const [palette, setPalette] = useState<BuildingId>("constructor");
   const [entities, setEntities] = useState<PlacedEntity[]>([]);
+  const [belts, setBelts] = useState<Belt[]>([]);
 
-  // Recipes (data-driven)
+  // --- Data recettes ---
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [productList, setProductList] = useState<string[]>([]);
   const [targetItem, setTargetItem] = useState<string>("");
@@ -41,25 +76,27 @@ export default function FactoryPlanner() {
   const [preferAlt, setPreferAlt] = useState<boolean>(false);
 
   const boardRef = useRef<HTMLDivElement>(null);
+
+  // Helpers
   const toPx = (m: number) => Math.round(m * scale);
   const snapToGrid = (m: number) => Math.round(m / gridStep) * gridStep;
 
-  // Load recipes once (import JSON -> state)
+  // Charger recettes (JSON)
   useEffect(() => {
     const data = RECIPES_DATA as Recipe[];
     setRecipes(data);
-    // unique product names (liste principale sans doublons)
     const uniques = Array.from(new Set(data.map(r => r.product.name)));
     setProductList(uniques.sort());
   }, []);
 
-  // For the selected product, check if an alt exists
+  // Y a-t-il une recette alternative pour le produit choisi ?
   const hasAlt = useMemo(() => {
     if (!targetItem) return false;
     const candidates = recipes.filter(r => r.product.name === targetItem);
     return candidates.some(r => r.alt);
   }, [recipes, targetItem]);
 
+  // -------------------------- Interactions --------------------------
   function addEntity(e: Omit<PlacedEntity, "id">) {
     setEntities(prev => [...prev, { ...e, id: Math.random().toString(36).slice(2, 9) }]);
   }
@@ -78,7 +115,7 @@ export default function FactoryPlanner() {
     }
   }
 
-  // Find recipe by product name (+ alt toggle)
+  // -------------------- Planificateur (graph) -----------------------
   function findRecipeByProduct(productName: string, preferAltLocal: boolean): Recipe | undefined {
     const candidates = recipes.filter(r => r.product.name === productName);
     if (candidates.length === 0) return undefined;
@@ -90,8 +127,8 @@ export default function FactoryPlanner() {
   function buildChain(productName: string, rate: number, preferAltLocal: boolean): Node | null {
     const r = findRecipeByProduct(productName, preferAltLocal);
     if (!r) return null;
-
     const machines = rate / r.product.rate;
+
     const node: Node = {
       name: r.product.name,
       recipeId: r.id,
@@ -101,7 +138,6 @@ export default function FactoryPlanner() {
       inputs: r.inputs.map(inp => ({ name: inp.name, rate: (rate * inp.rate) / r.product.rate })),
     };
 
-    // recurse only if we also know how to craft the input
     node.inputs = node.inputs.map(inp => {
       const sub = findRecipeByProduct(inp.name, preferAltLocal);
       if (sub) {
@@ -118,6 +154,7 @@ export default function FactoryPlanner() {
     return idx === -1 ? 5 : idx + 1;
   }
 
+  // ---------------------- Auto-layout machines ----------------------
   function autoLayout(root: Node, originX = 0, originY = 0) {
     const layers: Node[][] = [];
     function traverse(n: Node, depth: number) {
@@ -142,31 +179,99 @@ export default function FactoryPlanner() {
           const row = Math.floor(placed / perRow);
           const px = snapToGrid(x + col * (spec.w + spacing));
           const py = snapToGrid(y + row * (spec.h + spacing));
-          placements.push({ id: Math.random().toString(36).slice(2, 9), type: node.building, x: px, y: py, rotation: 0, meta: { w: spec.w, h: spec.h, node } });
+          placements.push({
+            id: Math.random().toString(36).slice(2, 9),
+            type: node.building,
+            x: px,
+            y: py,
+            rotation: 0,
+            meta: { w: spec.w, h: spec.h, node },
+          });
           placed++;
         }
-        x += (perRow * (spec.w + spacing)) + 8;
+        x += (perRow * (spec.w + spacing)) + 8; // +1 fondation entre groupes
       });
       y += 12;
     });
     return placements;
   }
 
-  function tooltipForNode(n: Node) {
-    const round2 = (v: number) => Math.round(v * 100) / 100;
-    const inputs = n.inputs.map(i => `${round2(i.rate)}/min ${i.name}`).join(" + ");
-    return `${n.name}: ${round2(n.outputRate)}/min\n${inputs}\nBelt ≥ Mk${minBeltMkFor(n.outputRate)}`;
+  // -------------------- Routage “Manhattan” v2.5 --------------------
+  function findEntityForNode(ens: PlacedEntity[], node: Node | undefined) {
+    if (!node) return undefined;
+    return ens.find(e => e.meta?.node?.recipeId === node.recipeId);
+  }
+  function outputPortOf(e: PlacedEntity) {
+    const w = e.meta?.w ?? 2; const h = e.meta?.h ?? 2;
+    return { x: e.x + w, y: e.y + h / 2 };
+  }
+  function inputPortOf(e: PlacedEntity, idx = 0) {
+    const w = e.meta?.w ?? 2; const h = e.meta?.h ?? 2;
+    const slots = Math.max(1, (e.meta?.node?.inputs?.length ?? 1));
+    const y = e.y + ((idx + 1) * (h / (slots + 1)));
+    return { x: e.x, y };
+  }
+  function routeManhattan(a: {x:number;y:number}, b: {x:number;y:number}, grid=1): BeltSegment[] {
+    const t = 0.3; // épaisseur (m)
+    const midX = Math.round(((a.x + b.x) / 2) / grid) * grid;
+    const segs: BeltSegment[] = [];
+    // h1
+    const x1 = Math.min(a.x, midX), x2 = Math.max(a.x, midX);
+    segs.push({ x: x1, y: a.y - t/2, w: x2 - x1, h: t });
+    // v
+    const y1 = Math.min(a.y, b.y), y2 = Math.max(a.y, b.y);
+    segs.push({ x: midX - t/2, y: y1, w: t, h: y2 - y1 });
+    // h2
+    const x3 = Math.min(midX, b.x), x4 = Math.max(midX, b.x);
+    segs.push({ x: x3, y: b.y - t/2, w: x4 - x3, h: t });
+    return segs;
+  }
+  function collectEdges(root: Node) {
+    const edges: { from: Node; to: Node; inputIndex: number; rate: number }[] = [];
+    (function dfs(n: Node) {
+      n.inputs.forEach((inp, i) => {
+        if (inp.from) {
+          edges.push({ from: inp.from, to: n, inputIndex: i, rate: inp.rate });
+          dfs(inp.from);
+        }
+      });
+    })(root);
+    return edges;
+  }
+  function planBelts(allEntities: PlacedEntity[], root: Node) {
+    const edges = collectEdges(root);
+    const arr: Belt[] = [];
+    edges.forEach(edge => {
+      const prod = findEntityForNode(allEntities, edge.from);
+      const cons = findEntityForNode(allEntities, edge.to);
+      if (!prod || !cons) return;
+      const start = outputPortOf(prod);
+      const end = inputPortOf(cons, edge.inputIndex);
+      const segments = routeManhattan(start, end, 1);
+      const mk = minBeltMkFor(edge.rate);
+      arr.push({ id: Math.random().toString(36).slice(2,9), mk, rate: edge.rate, segments });
+    });
+    return arr;
   }
 
+  // ------------------------- Action planner -------------------------
   function runPlanner() {
     if (!targetItem) return;
     const chain = buildChain(targetItem, targetRate, preferAlt);
     if (!chain) return;
+
     const placement = autoLayout(chain, 8, 8);
-    setEntities(prev => prev.filter(e => !e.meta?.node).concat(placement));
+
+    // Conserve les entités “manuelles” (sans meta.node), remplace les groupes calculés
+    const combined = entities.filter(e => !e.meta?.node).concat(placement);
+    setEntities(combined);
+
+    // Génère les convoyeurs entre groupes (v2.5)
+    const b = planBelts(combined, chain);
+    setBelts(b);
   }
 
-  // grid background sizes
+  // --------------------------- Rendu UI -----------------------------
   const bgStyle = useMemo(() => {
     const g = Math.max(1, gridStep);
     return {
@@ -184,7 +289,7 @@ export default function FactoryPlanner() {
   return (
     <div className="w-full h-full bg-zinc-900 text-zinc-100">
       <header className="flex items-center gap-3 p-3 border-b border-zinc-800 sticky top-0 z-20 bg-zinc-900/80 backdrop-blur">
-        <h1 className="text-xl font-semibold">Satisfactory Factory Planner — v2 (data-driven)</h1>
+        <h1 className="text-xl font-semibold">Satisfactory Factory Planner — v2.5</h1>
         <div className="ml-auto flex items-center gap-2 text-sm">
           <span className="opacity-70">Zoom</span>
           <input type="range" min={4} max={20} step={1} value={scale} onChange={e => setScale(parseInt(e.target.value))} />
@@ -210,7 +315,11 @@ export default function FactoryPlanner() {
           <h2 className="text-sm uppercase tracking-wider opacity-70 mb-3">Palette</h2>
           <div className="grid grid-cols-2 gap-2">
             {Object.values(BUILDINGS).map(b => (
-              <button key={b.id} onClick={() => { setPalette(b.id); setTool("place"); }} className={`rounded-xl border p-3 text-left hover:border-amber-400 ${palette===b.id?"border-amber-400 bg-amber-400/10":"border-zinc-700"}`}>
+              <button
+                key={b.id}
+                onClick={() => { setPalette(b.id); setTool("place"); }}
+                className={`rounded-xl border p-3 text-left hover:border-amber-400 ${palette===b.id?"border-amber-400 bg-amber-400/10":"border-zinc-700"}`}
+              >
                 <div className="font-medium">{b.name}</div>
                 <div className="text-xs opacity-70">{b.w}×{b.h} m</div>
               </button>
@@ -233,11 +342,41 @@ export default function FactoryPlanner() {
         <main className="relative overflow-auto" onClick={handleBoardClick}>
           <div ref={boardRef} className="relative min-w-[2000px] min-h-[1200px]" style={bgStyle}>
             <div className="absolute left-0 top-0 p-2 text-xs opacity-70">Origine (0,0) m</div>
+
+            {/* Convoyeurs (bandes ambrées) */}
+            {belts.map(belt =>
+              belt.segments.map((s, i) => (
+                <div
+                  key={belt.id + ":" + i}
+                  className="absolute"
+                  title={`Mk${belt.mk} · ${Math.round(belt.rate*100)/100}/min`}
+                  style={{
+                    left: toPx(s.x),
+                    top: toPx(s.y),
+                    width: toPx(Math.max(0.1, s.w)),
+                    height: toPx(Math.max(0.1, s.h)),
+                    background: "rgba(250, 204, 21, 0.8)",
+                    borderRadius: toPx(0.1),
+                  }}
+                />
+              ))
+            )}
+
+            {/* Machines */}
             {entities.map(e => (
               <div
                 key={e.id}
                 className="absolute rounded-2xl shadow-md border border-zinc-700 bg-zinc-800/80 backdrop-blur-sm hover:shadow-lg"
-                title={e.meta?.node ? tooltipForNode(e.meta.node) : (BUILDINGS as any)[e.type as BuildingId]?.name}
+                title={
+                  e.meta?.node
+                    ? (() => {
+                        const round2 = (v: number) => Math.round(v * 100) / 100;
+                        const n: Node = e.meta.node;
+                        const inputs = n.inputs.map(i => `${round2(i.rate)}/min ${i.name}`).join(" + ");
+                        return `${n.name}: ${round2(n.outputRate)}/min\n${inputs}\nBelt ≥ Mk${minBeltMkFor(n.outputRate)}`;
+                      })()
+                    : (BUILDINGS as any)[e.type as BuildingId]?.name
+                }
                 style={{ left: toPx(e.x), top: toPx(e.y), width: toPx(e.meta?.w ?? 2), height: toPx(e.meta?.h ?? 2) }}
               >
                 <div className="text-[10px] leading-tight p-1 text-zinc-200 flex items-center justify-between">
@@ -283,9 +422,9 @@ export default function FactoryPlanner() {
           <div className="pt-4 border-t border-zinc-800 text-sm space-y-2">
             <h3 className="uppercase tracking-wider opacity-70">Notes</h3>
             <ul className="list-disc ml-5 space-y-1 opacity-90">
-              <li>Recettes chargées depuis <code>recipes.json</code>.</li>
-              <li>Si tu ajoutes des recettes, elles apparaissent automatiquement.</li>
-              <li>Prochaines étapes : routage auto des convoyeurs, ports I/O exacts, électricité.</li>
+              <li>Recettes chargées depuis <code>src/data/recipes.json</code>.</li>
+              <li>Convoyeurs auto : tracé Manhattan simple + Mk minimal.</li>
+              <li>À venir : splitters/mergers auto, évitement d’obstacles, électricité.</li>
             </ul>
           </div>
         </aside>
