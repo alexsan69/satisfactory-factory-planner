@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import RECIPES_DATA from "./data/recipes.json";
 
-// ---------- Types & constantes locales (self-contained) ----------
+/* ===================== Types & constantes ===================== */
 export type BuildingId =
   | "smelter"
   | "constructor"
@@ -24,8 +24,8 @@ type ToolType = "select" | "place" | "belt";
 interface PlacedEntity {
   id: string;
   type: BuildingId | "belt";
-  x: number; // en mètres
-  y: number; // en mètres
+  x: number; // m
+  y: number; // m
   rotation: 0 | 90 | 180 | 270;
   meta?: any; // { w, h, node? }
 }
@@ -39,7 +39,7 @@ type Node = {
   inputs: { name: string; rate: number; from?: Node }[];
 };
 
-type BeltSegment = { x: number; y: number; w: number; h: number }; // en mètres
+type BeltSegment = { x: number; y: number; w: number; h: number }; // m
 type Belt = { id: string; mk: number; rate: number; segments: BeltSegment[] };
 
 const FOUNDATION_M = 8;
@@ -58,9 +58,9 @@ const BUILDINGS: Record<
 
 const DEFAULT_SCALE_PX_PER_M = 8;
 
-// ======================= Composant principal =======================
+/* ======================= Composant principal ======================= */
 export default function FactoryPlanner() {
-  // --- UI ---
+  // UI
   const [scale, setScale] = useState(DEFAULT_SCALE_PX_PER_M);
   const [gridStep, setGridStep] = useState(1);
   const [tool, setTool] = useState<ToolType>("select");
@@ -68,7 +68,7 @@ export default function FactoryPlanner() {
   const [entities, setEntities] = useState<PlacedEntity[]>([]);
   const [belts, setBelts] = useState<Belt[]>([]);
 
-  // --- Data recettes ---
+  // Data
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [productList, setProductList] = useState<string[]>([]);
   const [targetItem, setTargetItem] = useState<string>("");
@@ -77,11 +77,9 @@ export default function FactoryPlanner() {
 
   const boardRef = useRef<HTMLDivElement>(null);
 
-  // Helpers
   const toPx = (m: number) => Math.round(m * scale);
   const snapToGrid = (m: number) => Math.round(m / gridStep) * gridStep;
 
-  // Charger recettes (JSON)
   useEffect(() => {
     const data = RECIPES_DATA as Recipe[];
     setRecipes(data);
@@ -89,14 +87,13 @@ export default function FactoryPlanner() {
     setProductList(uniques.sort());
   }, []);
 
-  // Y a-t-il une recette alternative pour le produit choisi ?
   const hasAlt = useMemo(() => {
     if (!targetItem) return false;
     const candidates = recipes.filter(r => r.product.name === targetItem);
     return candidates.some(r => r.alt);
   }, [recipes, targetItem]);
 
-  // -------------------------- Interactions --------------------------
+  /* ---------------------------- Interactions ---------------------------- */
   function addEntity(e: Omit<PlacedEntity, "id">) {
     setEntities(prev => [...prev, { ...e, id: Math.random().toString(36).slice(2, 9) }]);
   }
@@ -115,7 +112,7 @@ export default function FactoryPlanner() {
     }
   }
 
-  // -------------------- Planificateur (graph) -----------------------
+  /* ------------------------- Planificateur (graph) ------------------------- */
   function findRecipeByProduct(productName: string, preferAltLocal: boolean): Recipe | undefined {
     const candidates = recipes.filter(r => r.product.name === productName);
     if (candidates.length === 0) return undefined;
@@ -146,6 +143,7 @@ export default function FactoryPlanner() {
       }
       return inp;
     });
+
     return node;
   }
 
@@ -154,15 +152,14 @@ export default function FactoryPlanner() {
     return idx === -1 ? 5 : idx + 1;
   }
 
-  // ---------------------- Auto-layout machines ----------------------
+  /* ------------------------ Auto-layout des machines ----------------------- */
   function autoLayout(root: Node, originX = 0, originY = 0) {
     const layers: Node[][] = [];
-    function traverse(n: Node, depth: number) {
+    (function traverse(n: Node, depth: number) {
       if (!layers[depth]) layers[depth] = [];
       if (!layers[depth].includes(n)) layers[depth].push(n);
       n.inputs.forEach(i => { if (i.from) traverse(i.from, depth + 1); });
-    }
-    traverse(root, 0);
+    })(root, 0);
 
     let y = originY;
     const placements: PlacedEntity[] = [];
@@ -196,21 +193,7 @@ export default function FactoryPlanner() {
     return placements;
   }
 
-  // -------------------- Routage “Manhattan” v2.5 --------------------
-  function findEntityForNode(ens: PlacedEntity[], node: Node | undefined) {
-    if (!node) return undefined;
-    return ens.find(e => e.meta?.node?.recipeId === node.recipeId);
-  }
-  function outputPortOf(e: PlacedEntity) {
-    const w = e.meta?.w ?? 2; const h = e.meta?.h ?? 2;
-    return { x: e.x + w, y: e.y + h / 2 };
-  }
-  function inputPortOf(e: PlacedEntity, idx = 0) {
-    const w = e.meta?.w ?? 2; const h = e.meta?.h ?? 2;
-    const slots = Math.max(1, (e.meta?.node?.inputs?.length ?? 1));
-    const y = e.y + ((idx + 1) * (h / (slots + 1)));
-    return { x: e.x, y };
-  }
+  /* ------------------- Routage + splitters/mergers v2.6 ------------------- */
   function routeManhattan(a: {x:number;y:number}, b: {x:number;y:number}, grid=1): BeltSegment[] {
     const t = 0.3; // épaisseur (m)
     const midX = Math.round(((a.x + b.x) / 2) / grid) * grid;
@@ -226,6 +209,7 @@ export default function FactoryPlanner() {
     segs.push({ x: x3, y: b.y - t/2, w: x4 - x3, h: t });
     return segs;
   }
+
   function collectEdges(root: Node) {
     const edges: { from: Node; to: Node; inputIndex: number; rate: number }[] = [];
     (function dfs(n: Node) {
@@ -238,23 +222,205 @@ export default function FactoryPlanner() {
     })(root);
     return edges;
   }
-  function planBelts(allEntities: PlacedEntity[], root: Node) {
-    const edges = collectEdges(root);
-    const arr: Belt[] = [];
-    edges.forEach(edge => {
-      const prod = findEntityForNode(allEntities, edge.from);
-      const cons = findEntityForNode(allEntities, edge.to);
-      if (!prod || !cons) return;
-      const start = outputPortOf(prod);
-      const end = inputPortOf(cons, edge.inputIndex);
-      const segments = routeManhattan(start, end, 1);
-      const mk = minBeltMkFor(edge.rate);
-      arr.push({ id: Math.random().toString(36).slice(2,9), mk, rate: edge.rate, segments });
-    });
-    return arr;
+
+  // Entités ↔ Node
+  function entitiesForNode(ens: PlacedEntity[], node?: Node) {
+    if (!node) return [] as PlacedEntity[];
+    return ens.filter(e => e.meta?.node?.recipeId === node.recipeId);
   }
 
-  // ------------------------- Action planner -------------------------
+  // Ports (machines/splitter/merger)
+  function outputPortOf(e: PlacedEntity) {
+    const w = e.meta?.w ?? 2, h = e.meta?.h ?? 2;
+    return { x: e.x + w, y: e.y + h / 2 }; // côté droit, milieu
+  }
+  function inputPortOf(e: PlacedEntity, idx = 0) {
+    const w = e.meta?.w ?? 2, h = e.meta?.h ?? 2;
+    const defaultSlots =
+      e.type === "merger" ? 3 :
+      e.type === "assembler" ? 2 :
+      e.type === "manufacturer" ? 4 : 1;
+    const slots = Math.max(1, e.meta?.node?.inputs?.length ?? defaultSlots);
+    const y = e.y + ((idx + 1) * (h / (slots + 1)));
+    return { x: e.x, y }; // côté gauche
+  }
+
+  // Placement d’un splitter/merger (proche de la machine)
+  function placeSplitterNear(prod: PlacedEntity): PlacedEntity {
+    const spec = BUILDINGS["splitter"];
+    const w = prod.meta?.w ?? 2, h = prod.meta?.h ?? 2;
+    const x = snapToGrid(prod.x + w + 1);
+    const y = snapToGrid(prod.y + h / 2 - spec.h / 2);
+    return {
+      id: Math.random().toString(36).slice(2,9),
+      type: "splitter",
+      x, y, rotation: 0,
+      meta: { w: spec.w, h: spec.h }
+    };
+  }
+  function placeMergerNear(cons: PlacedEntity): PlacedEntity {
+    const spec = BUILDINGS["merger"];
+    const w = cons.meta?.w ?? 2, h = cons.meta?.h ?? 2;
+    const x = snapToGrid(cons.x - spec.w - 1);
+    const y = snapToGrid(cons.y + h / 2 - spec.h / 2);
+    return {
+      id: Math.random().toString(36).slice(2,9),
+      type: "merger",
+      x, y, rotation: 0,
+      meta: { w: spec.w, h: spec.h }
+    };
+  }
+
+  function planBeltsWithJunctions(allEntities: PlacedEntity[], root: Node) {
+    const edges = collectEdges(root);
+    const belts: Belt[] = [];
+    const extras: PlacedEntity[] = [];
+
+    // Pour éviter les doublons : un splitter par producteur, un merger par consommateur
+    const splitterByProdId = new Map<string, PlacedEntity>();
+    const mergerByConsId   = new Map<string, PlacedEntity>();
+
+    edges.forEach(edge => {
+      const producers = entitiesForNode(allEntities, edge.from);
+      const consumers = entitiesForNode(allEntities, edge.to);
+      if (producers.length === 0 || consumers.length === 0) return;
+
+      // Répartition simple des débits
+      const total = edge.rate;
+      const perConsumerRate = total / consumers.length;
+      const perProducerRate = total / producers.length;
+
+      // Cas 1: 1 prod → N cons  (Split)
+      if (producers.length === 1 && consumers.length > 1) {
+        const prod = producers[0];
+
+        // Splitter près du producteur (unique)
+        let split = splitterByProdId.get(prod.id);
+        if (!split) {
+          split = placeSplitterNear(prod);
+          splitterByProdId.set(prod.id, split);
+          extras.push(split);
+
+          // Ceinture prod → splitter (taux total)
+          belts.push({
+            id: Math.random().toString(36).slice(2,9),
+            mk: minBeltMkFor(total),
+            rate: total,
+            segments: routeManhattan(outputPortOf(prod), inputPortOf(split), 1),
+          });
+        }
+
+        // Branches splitter → chaque consommateur
+        consumers.forEach((cons, j) => {
+          belts.push({
+            id: Math.random().toString(36).slice(2,9),
+            mk: minBeltMkFor(perConsumerRate),
+            rate: perConsumerRate,
+            segments: routeManhattan(outputPortOf(split!), inputPortOf(cons, edge.inputIndex), 1),
+          });
+        });
+        return;
+      }
+
+      // Cas 2: N prod → 1 cons  (Merge)
+      if (producers.length > 1 && consumers.length === 1) {
+        const cons = consumers[0];
+
+        // Merger près du consommateur (unique)
+        let merge = mergerByConsId.get(cons.id);
+        if (!merge) {
+          merge = placeMergerNear(cons);
+          mergerByConsId.set(cons.id, merge);
+          extras.push(merge);
+
+          // Ceinture merger → consommateur (taux total)
+          belts.push({
+            id: Math.random().toString(36).slice(2,9),
+            mk: minBeltMkFor(total),
+            rate: total,
+            segments: routeManhattan(outputPortOf(merge), inputPortOf(cons, edge.inputIndex), 1),
+          });
+        }
+
+        // Branches chaque producteur → merger (réparti)
+        producers.forEach(prod => {
+          belts.push({
+            id: Math.random().toString(36).slice(2,9),
+            mk: minBeltMkFor(perProducerRate),
+            rate: perProducerRate,
+            segments: routeManhattan(outputPortOf(prod), inputPortOf(merge!), 1),
+          });
+        });
+        return;
+      }
+
+      // Cas 3: N prod → N cons  (Split + Merge)
+      if (producers.length > 1 && consumers.length > 1) {
+        // Splitter par producteur
+        const splitters = producers.map(prod => {
+          let s = splitterByProdId.get(prod.id);
+          if (!s) {
+            s = placeSplitterNear(prod);
+            splitterByProdId.set(prod.id, s);
+            extras.push(s);
+            // prod → split (par producteur)
+            belts.push({
+              id: Math.random().toString(36).slice(2,9),
+              mk: minBeltMkFor(perProducerRate),
+              rate: perProducerRate,
+              segments: routeManhattan(outputPortOf(prod), inputPortOf(s), 1),
+            });
+          }
+          return s!;
+        });
+
+        // Merger par consommateur (unique par consommateur)
+        const mergers = consumers.map(cons => {
+          let m = mergerByConsId.get(cons.id);
+          if (!m) {
+            m = placeMergerNear(cons);
+            mergerByConsId.set(cons.id, m);
+            extras.push(m);
+            // merger → cons (par consommateur)
+            belts.push({
+              id: Math.random().toString(36).slice(2,9),
+              mk: minBeltMkFor(perConsumerRate),
+              rate: perConsumerRate,
+              segments: routeManhattan(outputPortOf(m), inputPortOf(cons, edge.inputIndex), 1),
+            });
+          }
+          return m!;
+        });
+
+        // Lignes splitters → mergers (maillage simple : chaque splitter → chaque merger)
+        const rateSplitToMerge = total / Math.max(1, producers.length); // approx
+        splitters.forEach(s => {
+          mergers.forEach(m => {
+            belts.push({
+              id: Math.random().toString(36).slice(2,9),
+              mk: minBeltMkFor(rateSplitToMerge / mergers.length), // réparti
+              rate: rateSplitToMerge / mergers.length,
+              segments: routeManhattan(outputPortOf(s), inputPortOf(m), 1),
+            });
+          });
+        });
+        return;
+      }
+
+      // Cas 4: 1 prod → 1 cons (direct)
+      const prod = producers[0], cons = consumers[0];
+      belts.push({
+        id: Math.random().toString(36).slice(2,9),
+        mk: minBeltMkFor(total),
+        rate: total,
+        segments: routeManhattan(outputPortOf(prod), inputPortOf(cons, edge.inputIndex), 1),
+      });
+    });
+
+    return { belts, extras };
+  }
+
+  /* ------------------------------ Action ------------------------------ */
   function runPlanner() {
     if (!targetItem) return;
     const chain = buildChain(targetItem, targetRate, preferAlt);
@@ -262,16 +428,17 @@ export default function FactoryPlanner() {
 
     const placement = autoLayout(chain, 8, 8);
 
-    // Conserve les entités “manuelles” (sans meta.node), remplace les groupes calculés
+    // Conserver les placements “manuels” existants (sans node) et remplacer les calculés
     const combined = entities.filter(e => !e.meta?.node).concat(placement);
-    setEntities(combined);
 
-    // Génère les convoyeurs entre groupes (v2.5)
-    const b = planBelts(combined, chain);
-    setBelts(b);
+    // Générer convoyeurs + splitters/mergers auto
+    const { belts: newBelts, extras } = planBeltsWithJunctions(combined, chain);
+
+    setEntities(combined.concat(extras));
+    setBelts(newBelts);
   }
 
-  // --------------------------- Rendu UI -----------------------------
+  /* ------------------------------ Rendu ------------------------------ */
   const bgStyle = useMemo(() => {
     const g = Math.max(1, gridStep);
     return {
@@ -289,7 +456,7 @@ export default function FactoryPlanner() {
   return (
     <div className="w-full h-full bg-zinc-900 text-zinc-100">
       <header className="flex items-center gap-3 p-3 border-b border-zinc-800 sticky top-0 z-20 bg-zinc-900/80 backdrop-blur">
-        <h1 className="text-xl font-semibold">Satisfactory Factory Planner — v2.5</h1>
+        <h1 className="text-xl font-semibold">Satisfactory Factory Planner — v2.6</h1>
         <div className="ml-auto flex items-center gap-2 text-sm">
           <span className="opacity-70">Zoom</span>
           <input type="range" min={4} max={20} step={1} value={scale} onChange={e => setScale(parseInt(e.target.value))} />
@@ -355,18 +522,18 @@ export default function FactoryPlanner() {
                     top: toPx(s.y),
                     width: toPx(Math.max(0.1, s.w)),
                     height: toPx(Math.max(0.1, s.h)),
-                    background: "rgba(250, 204, 21, 0.8)",
+                    background: "rgba(250, 204, 21, 0.85)",
                     borderRadius: toPx(0.1),
                   }}
                 />
               ))
             )}
 
-            {/* Machines */}
+            {/* Machines + jonctions */}
             {entities.map(e => (
               <div
                 key={e.id}
-                className="absolute rounded-2xl shadow-md border border-zinc-700 bg-zinc-800/80 backdrop-blur-sm hover:shadow-lg"
+                className={`absolute rounded-2xl shadow-md border ${e.type==="splitter"||e.type==="merger" ? "border-amber-500 bg-amber-500/10" : "border-zinc-700 bg-zinc-800/80"} backdrop-blur-sm hover:shadow-lg`}
                 title={
                   e.meta?.node
                     ? (() => {
@@ -375,12 +542,12 @@ export default function FactoryPlanner() {
                         const inputs = n.inputs.map(i => `${round2(i.rate)}/min ${i.name}`).join(" + ");
                         return `${n.name}: ${round2(n.outputRate)}/min\n${inputs}\nBelt ≥ Mk${minBeltMkFor(n.outputRate)}`;
                       })()
-                    : (BUILDINGS as any)[e.type as BuildingId]?.name
+                    : BUILDINGS[e.type as BuildingId]?.name
                 }
                 style={{ left: toPx(e.x), top: toPx(e.y), width: toPx(e.meta?.w ?? 2), height: toPx(e.meta?.h ?? 2) }}
               >
                 <div className="text-[10px] leading-tight p-1 text-zinc-200 flex items-center justify-between">
-                  <span>{(BUILDINGS as any)[e.type]?.name ?? "Belt"}</span>
+                  <span>{BUILDINGS[e.type as BuildingId]?.name ?? "Belt"}</span>
                   <button className="opacity-70 hover:opacity-100" onClick={(ev) => { ev.stopPropagation(); removeEntity(e.id); }}>✕</button>
                 </div>
                 {e.meta?.node && (
@@ -422,9 +589,10 @@ export default function FactoryPlanner() {
           <div className="pt-4 border-t border-zinc-800 text-sm space-y-2">
             <h3 className="uppercase tracking-wider opacity-70">Notes</h3>
             <ul className="list-disc ml-5 space-y-1 opacity-90">
-              <li>Recettes chargées depuis <code>src/data/recipes.json</code>.</li>
-              <li>Convoyeurs auto : tracé Manhattan simple + Mk minimal.</li>
-              <li>À venir : splitters/mergers auto, évitement d’obstacles, électricité.</li>
+              <li>Recettes depuis <code>src/data/recipes.json</code>.</li>
+              <li>Convoyeurs par machine + Mk sur chaque branche.</li>
+              <li>Splitters/Mergers placés automatiquement (v2.6).</li>
+              <li>Prochaines étapes : évitement d’obstacles, ports I/O exacts, énergie.</li>
             </ul>
           </div>
         </aside>
